@@ -11,6 +11,28 @@
 
 </div>
 
+## Nuvo-maintained Snowflake release
+
+This fork publishes [`nuvo-v0.36.26`](https://github.com/nuvo-tech/peerdb/releases/tag/nuvo-v0.36.26),
+a targeted patch on upstream PeerDB `v0.36.26` for existing Snowflake deployments using nullable
+destination schemas.
+
+Upstream `v0.36.26` can propagate a required destination column's nullability into a Snowflake
+MERGE cast and generate invalid SQL such as `CAST(... AS TIMESTAMP_TZ NOT NULL)`. Snowflake does
+not allow `NOT NULL` in a cast type. The patch excludes nullability only while generating MERGE
+casts; destination-table DDL still retains `NOT NULL` constraints.
+
+Nuvo deploys only the patched flow-worker image. The PeerDB server, UI, API, snapshot worker, and
+Temporal components remain on their official `v0.36.26` images.
+
+- Image: `ghcr.io/nuvo-tech/peerdb-flow-worker:nuvo-v0.36.26`
+- Platforms: `linux/amd64`, `linux/arm64`
+- Upstream contribution: [PeerDB-io/peerdb#4683](https://github.com/PeerDB-io/peerdb/pull/4683)
+- Maintenance branch: [`nuvo-v0.36.26-snowflake-nullable`](https://github.com/nuvo-tech/peerdb/tree/nuvo-v0.36.26-snowflake-nullable)
+
+Snowflake is deprecated upstream. This release is a compatibility build for Nuvo's existing
+Snowflake mirrors, not a reversal of the upstream connector deprecation.
+
 ## PeerDB
 
 At PeerDB, we are building a fast, simple and the most cost effective way to stream data from Postgres to Data Warehouses, Queues and Storage engines. If you are running Postgres at the heart of your data-stack and move data at scale from Postgres to any of the above targets, PeerDB can provide value.
