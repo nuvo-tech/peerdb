@@ -65,6 +65,42 @@ func TestGenerateMergeStatementNullableSchemaDoesNotAddNotNullToCasts(t *testing
 	}
 }
 
+func TestGenerateMergeStatementSkipsIncompleteSoftDeleteInsert(t *testing.T) {
+	destinationTable := "public.events"
+	generator := &mergeStmtGenerator{
+		tableSchemaMapping: map[string]*protos.TableSchema{
+			destinationTable: {
+				Columns: []*protos.FieldDescription{
+					{Name: "id", Type: string(types.QValueKindInt64), Nullable: false},
+					{Name: "created_at", Type: string(types.QValueKindTimestampTZ), Nullable: false},
+				},
+				PrimaryKeyColumns: []string{"id"},
+				NullableEnabled:   true,
+			},
+		},
+		unchangedToastColumnsMap: map[string][]string{destinationTable: {""}},
+		peerdbCols: &protos.PeerDBColumns{
+			SoftDeleteColName: "_PEERDB_IS_DELETED",
+		},
+		rawTableName: "raw_events",
+		mergeBatchId: 1,
+	}
+
+	statement, err := generator.generateMergeStmt(context.Background(), nil, destinationTable)
+	if err != nil {
+		t.Fatalf("generate merge statement: %v", err)
+	}
+
+	normalizedStatement := utils.RemoveSpacesTabsNewlines(statement)
+	expectedGuard := utils.RemoveSpacesTabsNewlines(
+		`WHEN NOT MATCHED AND (SOURCE._PEERDB_RECORD_TYPE = 2)
+		AND COALESCE(SOURCE._PEERDB_UNCHANGED_TOAST_COLUMNS, '') = '' THEN INSERT`,
+	)
+	if !strings.Contains(normalizedStatement, expectedGuard) {
+		t.Fatalf("unmatched soft-delete insert does not require a complete payload: %s", statement)
+	}
+}
+
 func TestGenerateUpdateStatement(t *testing.T) {
 	allCols := []string{"col1", "col2", "col3"}
 	unchangedToastCols := []string{""}
