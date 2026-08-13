@@ -905,6 +905,129 @@ func (s PeerFlowE2ETestSuiteSF) Test_Soft_Delete_Basic() {
 	require.Equal(s.t, 1, numNewRows)
 }
 
+func (s PeerFlowE2ETestSuiteSF) Test_Soft_Delete_UnbackfilledDeleteDoesNotInsertTombstone() {
+	tc := NewTemporalClient(s.t)
+
+	srcName := "test_softdel_unbackfilled_src"
+	dstName := "test_softdel_unbackfilled"
+	srcTableName := s.attachSchemaSuffix(srcName)
+	dstTableName := fmt.Sprintf("%s.%s", s.sfHelper.testSchemaName, dstName)
+
+	_, err := s.Conn().Exec(s.t.Context(), fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id INT PRIMARY KEY,
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL
+		);
+	`, srcTableName))
+	require.NoError(s.t, err)
+
+	config := &protos.FlowConnectionConfigs{
+		FlowJobName:     s.attachSuffix(dstName),
+		DestinationName: s.Peer().Name,
+		TableMappings: []*protos.TableMapping{
+			{
+				SourceTableIdentifier:      srcTableName,
+				DestinationTableIdentifier: dstTableName,
+			},
+		},
+		SourceName:        GeneratePostgresPeer(s.t).Name,
+		SoftDeleteColName: "_PEERDB_IS_DELETED",
+		SyncedAtColName:   "_PEERDB_SYNCED_AT",
+		MaxBatchSize:      100,
+		Env:               map[string]string{"PEERDB_NULLABLE": "true"},
+	}
+
+	env := ExecutePeerflow(s.t, tc, config)
+	SetupCDCFlowStatusQuery(s.t, env, config)
+
+	_, err = s.Conn().Exec(s.t.Context(), fmt.Sprintf(`
+		INSERT INTO %s(id,created_at,updated_at) VALUES (1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, srcTableName))
+	EnvNoError(s.t, env, err)
+	EnvWaitForEqualTablesWithNames(env, s, "normalize initial row", srcName, dstName, "id,created_at,updated_at")
+
+	EnvNoError(s.t, env, s.sfHelper.RunCommand(s.t.Context(), fmt.Sprintf(`DELETE FROM %s WHERE id=1`, dstTableName)))
+
+	tx, err := s.Conn().Begin(s.t.Context())
+	EnvNoError(s.t, env, err)
+	_, err = tx.Exec(s.t.Context(), fmt.Sprintf(`DELETE FROM %s WHERE id=1`, srcTableName))
+	EnvNoError(s.t, env, err)
+	_, err = tx.Exec(s.t.Context(), fmt.Sprintf(`
+		INSERT INTO %s(id,created_at,updated_at) VALUES (2,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, srcTableName))
+	EnvNoError(s.t, env, err)
+	EnvNoError(s.t, env, tx.Commit(s.t.Context()))
+
+	EnvWaitFor(s.t, env, 3*time.Minute, "normalize batch containing unbackfilled delete", func() bool {
+		rowCount, err := s.sfHelper.RunIntQuery(s.t.Context(),
+			fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id=2 AND NOT _PEERDB_IS_DELETED`, dstTableName))
+		EnvNoError(s.t, env, err)
+		return rowCount == 1
+	})
+
+	deletedRowCount, err := s.sfHelper.RunIntQuery(s.t.Context(),
+		fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id=1`, dstTableName))
+	require.NoError(s.t, err)
+	require.Equal(s.t, 0, deletedRowCount)
+
+	env.Cancel(s.t.Context())
+	RequireEnvCanceled(s.t, env)
+}
+
+func (s PeerFlowE2ETestSuiteSF) Test_Soft_Delete_ID_Same_Batch() {
+	tc := NewTemporalClient(s.t)
+
+	tableName := "test_softdel_id"
+	srcTableName := s.attachSchemaSuffix(tableName + "_src")
+	dstTableName := fmt.Sprintf("%s.%s", s.sfHelper.testSchemaName, tableName)
+
+	_, err := s.Conn().Exec(s.t.Context(), fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id INT PRIMARY KEY,
+			created_at TIMESTAMPTZ NOT NULL
+		);
+	`, srcTableName))
+	require.NoError(s.t, err)
+
+	config := &protos.FlowConnectionConfigs{
+		FlowJobName:     s.attachSuffix(tableName),
+		DestinationName: s.Peer().Name,
+		TableMappings: []*protos.TableMapping{
+			{
+				SourceTableIdentifier:      srcTableName,
+				DestinationTableIdentifier: dstTableName,
+			},
+		},
+		SourceName:        GeneratePostgresPeer(s.t).Name,
+		SoftDeleteColName: "_PEERDB_IS_DELETED",
+		SyncedAtColName:   "_PEERDB_SYNCED_AT",
+		MaxBatchSize:      100,
+		Env:               map[string]string{"PEERDB_NULLABLE": "true"},
+	}
+
+	env := ExecutePeerflow(s.t, tc, config)
+	SetupCDCFlowStatusQuery(s.t, env, config)
+
+	tx, err := s.Conn().Begin(s.t.Context())
+	EnvNoError(s.t, env, err)
+	_, err = tx.Exec(s.t.Context(), fmt.Sprintf(`
+		INSERT INTO %s(id,created_at) VALUES (1,CURRENT_TIMESTAMP)`, srcTableName))
+	EnvNoError(s.t, env, err)
+	_, err = tx.Exec(s.t.Context(), fmt.Sprintf(`DELETE FROM %s WHERE id=1`, srcTableName))
+	EnvNoError(s.t, env, err)
+	EnvNoError(s.t, env, tx.Commit(s.t.Context()))
+
+	EnvWaitFor(s.t, env, 3*time.Minute, "normalize same-batch insert and delete", func() bool {
+		rowCount, err := s.sfHelper.RunIntQuery(s.t.Context(), fmt.Sprintf(`
+			SELECT COUNT(*) FROM %s
+			WHERE id=1 AND _PEERDB_IS_DELETED AND created_at IS NOT NULL`, dstTableName))
+		EnvNoError(s.t, env, err)
+		return rowCount == 1
+	})
+
+	env.Cancel(s.t.Context())
+	RequireEnvCanceled(s.t, env)
+}
+
 func (s PeerFlowE2ETestSuiteSF) Test_Soft_Delete_IUD_Same_Batch() {
 	tc := NewTemporalClient(s.t)
 

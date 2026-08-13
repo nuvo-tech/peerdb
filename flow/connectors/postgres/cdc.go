@@ -876,9 +876,9 @@ func PullCdcRecords[Items model.Items](
 									return err
 								} else if found {
 									r.Items = latestRecord.GetItems()
+									backfilled = true
 									if updateRecord, ok := latestRecord.(*model.UpdateRecord[Items]); ok {
 										r.UnchangedToastColumns = updateRecord.UnchangedToastColumns
-										backfilled = true
 									}
 								}
 							}

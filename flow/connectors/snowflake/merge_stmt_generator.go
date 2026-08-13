@@ -100,15 +100,16 @@ func (m *mergeStmtGenerator) generateMergeStmt(ctx context.Context, env map[stri
 	insertValuesSQL := strings.Join(insertValuesSQLArray, ",")
 	updateStatementsforToastCols := m.generateUpdateStatements(columnNames, unchangedToastColumns)
 
-	// handling the case when an insert and delete happen in the same batch, with updates in the middle
-	// with soft-delete, we want the row to be in the destination with SOFT_DELETE true
-	// the current merge statement doesn't do that, so we add another case to insert the DeleteRecord
+	// Handle an insert and delete in the same batch by materializing a soft-deleted row.
+	// Deletes with unchanged columns have incomplete payloads, so they cannot materialize a new row.
 	if m.peerdbCols.SoftDeleteColName != "" {
 		softDeleteInsertColumnsSQL := strings.Join(append(quotedUpperColNames,
 			m.peerdbCols.SoftDeleteColName), ",")
 		softDeleteInsertValuesSQL := insertValuesSQL + ",TRUE"
 		updateStatementsforToastCols = append(updateStatementsforToastCols,
-			fmt.Sprintf("WHEN NOT MATCHED AND (SOURCE._PEERDB_RECORD_TYPE = 2) THEN INSERT (%s) VALUES(%s)",
+			fmt.Sprintf(`WHEN NOT MATCHED AND (SOURCE._PEERDB_RECORD_TYPE = 2)
+				AND COALESCE(SOURCE._PEERDB_UNCHANGED_TOAST_COLUMNS, '') = ''
+				THEN INSERT (%s) VALUES(%s)`,
 				softDeleteInsertColumnsSQL, softDeleteInsertValuesSQL))
 	}
 	updateStringToastCols := strings.Join(updateStatementsforToastCols, " ")
