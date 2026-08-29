@@ -551,15 +551,11 @@ func (c *PostgresConnector) createSlotAndPublication(
 			return model.SetupReplicationResult{}, fmt.Errorf("[slot] error acquiring connection: %w", err)
 		}
 
-		// THIS IS NOT IN A TX!
-		if _, err := conn.Exec(ctx, "SET idle_in_transaction_session_timeout=0"); err != nil {
+		// These are session settings; this connection is intentionally retained
+		// until every snapshot partition finishes.
+		if err := configureSnapshotSlotConnection(ctx, conn); err != nil {
 			conn.Close(ctx)
-			return model.SetupReplicationResult{}, fmt.Errorf("[slot] error setting idle_in_transaction_session_timeout: %w", err)
-		}
-
-		if _, err := conn.Exec(ctx, "SET lock_timeout=0"); err != nil {
-			conn.Close(ctx)
-			return model.SetupReplicationResult{}, fmt.Errorf("[slot] error setting lock_timeout: %w", err)
+			return model.SetupReplicationResult{}, err
 		}
 
 		pgversion, err := c.MajorVersion(ctx)
