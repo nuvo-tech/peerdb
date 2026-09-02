@@ -68,6 +68,8 @@ const (
 		FROM table(result_scan(?))`
 	checkIfTableExistsSQL = `SELECT TO_BOOLEAN(COUNT(1)) FROM INFORMATION_SCHEMA.TABLES
 	 WHERE TABLE_SCHEMA=? and TABLE_NAME=?`
+	checkIfColumnExistsSQL = `SELECT TO_BOOLEAN(COUNT(1)) FROM INFORMATION_SCHEMA.COLUMNS
+	 WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND COLUMN_NAME=?`
 	dropTableIfExistsSQL = "DROP TABLE IF EXISTS %s.%s"
 )
 
@@ -345,18 +347,6 @@ func (c *SnowflakeConnector) ReplayTableSchemaDeltas(
 		return nil
 	}
 
-	tableSchemaModifyTx, err := c.Begin()
-	if err != nil {
-		return fmt.Errorf("error starting transaction for schema modification: %w",
-			err)
-	}
-	defer func() {
-		deferErr := tableSchemaModifyTx.Rollback()
-		if deferErr != sql.ErrTxDone && deferErr != nil {
-			c.logger.Error("error rolling back transaction for table schema modification", "error", deferErr)
-		}
-	}()
-
 	for _, schemaDelta := range schemaDeltas {
 		if schemaDelta == nil || len(schemaDelta.AddedColumns) == 0 {
 			continue
@@ -365,19 +355,49 @@ func (c *SnowflakeConnector) ReplayTableSchemaDeltas(
 		for _, addedColumn := range schemaDelta.AddedColumns {
 			qvKind := types.QValueKind(addedColumn.Type)
 			sfColtype, err := qvalue.ToDWHColumnType(
-				ctx, qvKind, env, protos.DBType_SNOWFLAKE, nil, addedColumn, schemaDelta.NullableEnabled, nil,
+				ctx, qvKind, env, protos.DBType_SNOWFLAKE, nil, addedColumn, false, nil,
 			)
 			if err != nil {
 				return fmt.Errorf("failed to convert column type %s to snowflake type: %w",
 					addedColumn.Type, err)
 			}
 
-			if _, err := tableSchemaModifyTx.ExecContext(ctx,
-				fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS \"%s\" %s",
-					schemaDelta.DstTableName, strings.ToUpper(addedColumn.Name), sfColtype),
-			); err != nil {
+			columnExists, err := c.checkIfColumnExists(ctx, schemaDelta.DstTableName, addedColumn.Name)
+			if err != nil {
+				return fmt.Errorf("failed to check column %s for table %s: %w", addedColumn.Name,
+					schemaDelta.DstTableName, err)
+			}
+			if columnExists {
+				continue
+			}
+
+			defaultExpr := snowflakeDefaultExpr(qvKind, addedColumn.DefaultExpr)
+			if addedColumn.DefaultExpr != nil && defaultExpr == nil {
+				c.logger.Warn("[schema delta replay] omitting source default incompatible with Snowflake ADD COLUMN",
+					slog.String("column", addedColumn.Name),
+					slog.String("type", addedColumn.Type),
+					slog.String("default", addedColumn.GetDefaultExpr()),
+					slog.String("destination table name", schemaDelta.DstTableName))
+			}
+			addColumnSQL, fallbackSQL, err := generateAddColumnSQL(
+				schemaDelta.DstTableName, addedColumn.Name, sfColtype, defaultExpr,
+			)
+			if err != nil {
+				return err
+			}
+			if _, err := c.execWithLogging(ctx, addColumnSQL); err != nil && fallbackSQL == "" {
 				return fmt.Errorf("failed to add column %s for table %s: %w", addedColumn.Name,
 					schemaDelta.DstTableName, err)
+			} else if err != nil {
+				c.logger.Warn("[schema delta replay] retrying added column without its source default",
+					slog.String("column", addedColumn.Name),
+					slog.String("default", addedColumn.GetDefaultExpr()),
+					slog.String("destination table name", schemaDelta.DstTableName),
+					slog.Any("error", err))
+				if _, fallbackErr := c.execWithLogging(ctx, fallbackSQL); fallbackErr != nil {
+					return fmt.Errorf("failed to add column %s for table %s without its source default: %w",
+						addedColumn.Name, schemaDelta.DstTableName, fallbackErr)
+				}
 			}
 			c.logger.Info(fmt.Sprintf("[schema delta replay] added column %s with data type %s", addedColumn.Name,
 				sfColtype),
@@ -386,12 +406,45 @@ func (c *SnowflakeConnector) ReplayTableSchemaDeltas(
 		}
 	}
 
-	if err := tableSchemaModifyTx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transaction for table schema modification: %w",
-			err)
-	}
-
 	return nil
+}
+
+func snowflakeDefaultExpr(kind types.QValueKind, defaultExpr *string) *string {
+	if defaultExpr == nil {
+		return nil
+	}
+	switch kind {
+	case types.QValueKindBoolean,
+		types.QValueKindInt8, types.QValueKindInt16, types.QValueKindInt32, types.QValueKindInt64,
+		types.QValueKindUInt8, types.QValueKindUInt16, types.QValueKindUInt32, types.QValueKindUInt64,
+		types.QValueKindFloat32, types.QValueKindFloat64, types.QValueKindNumeric,
+		types.QValueKindQChar, types.QValueKindString, types.QValueKindEnum, types.QValueKindUUID,
+		types.QValueKindCIDR, types.QValueKindINET, types.QValueKindMacaddr:
+		return defaultExpr
+	default:
+		return nil
+	}
+}
+
+func generateAddColumnSQL(
+	tableName, columnName, columnType string,
+	defaultExpr *string,
+) (string, string, error) {
+	schemaTable, err := common.ParseTableIdentifier(tableName)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to parse table name: %w", err)
+	}
+	normalizedTableName := snowflakeSchemaTableNormalize(schemaTable)
+	bare := fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s",
+		normalizedTableName, SnowflakeIdentifierNormalize(columnName), columnType)
+	if defaultExpr == nil {
+		return bare, "", nil
+	}
+	// Snowflake forbids IF NOT EXISTS together with DEFAULT. Replay checks existence first,
+	// then falls back to the idempotent bare form if Snowflake rejects the source literal.
+	withDefault := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s DEFAULT %s",
+		normalizedTableName, SnowflakeIdentifierNormalize(columnName), columnType, *defaultExpr)
+	return withDefault, bare, nil
 }
 
 func (c *SnowflakeConnector) withMirrorNameQueryTag(ctx context.Context, mirrorName string) context.Context {
@@ -651,6 +704,28 @@ func (c *SnowflakeConnector) checkIfTableExists(
 	return result.Bool, nil
 }
 
+func (c *SnowflakeConnector) checkIfColumnExists(
+	ctx context.Context,
+	tableIdentifier string,
+	columnIdentifier string,
+) (bool, error) {
+	schemaTable, err := common.ParseTableIdentifier(tableIdentifier)
+	if err != nil {
+		return false, fmt.Errorf("failed to parse table name: %w", err)
+	}
+
+	var result pgtype.Bool
+	err = c.QueryRowContext(ctx, checkIfColumnExistsSQL,
+		SnowflakeQuotelessIdentifierNormalize(schemaTable.Namespace),
+		SnowflakeQuotelessIdentifierNormalize(schemaTable.Table),
+		SnowflakeQuotelessIdentifierNormalize(columnIdentifier),
+	).Scan(&result)
+	if err != nil {
+		return false, fmt.Errorf("error while reading result row: %w", err)
+	}
+	return result.Valid && result.Bool, nil
+}
+
 func generateCreateTableSQLForNormalizedTable(
 	ctx context.Context,
 	config *protos.SetupNormalizedTableBatchInput,
@@ -663,7 +738,7 @@ func generateCreateTableSQLForNormalizedTable(
 		normalizedColName := SnowflakeIdentifierNormalize(column.Name)
 		qvKind := types.QValueKind(genericColumnType)
 		sfColType, err := qvalue.ToDWHColumnType(
-			ctx, qvKind, config.Env, protos.DBType_SNOWFLAKE, nil, column, tableSchema.NullableEnabled, nil,
+			ctx, qvKind, config.Env, protos.DBType_SNOWFLAKE, nil, column, false, nil,
 		)
 		if err != nil {
 			slog.WarnContext(ctx, fmt.Sprintf("failed to convert column type %s to snowflake type", genericColumnType),
@@ -671,12 +746,7 @@ func generateCreateTableSQLForNormalizedTable(
 			continue
 		}
 
-		var notNull string
-		if tableSchema.NullableEnabled && !column.Nullable {
-			notNull = " NOT NULL"
-		}
-
-		createTableSQLArray = append(createTableSQLArray, fmt.Sprintf("%s %s%s", normalizedColName, sfColType, notNull))
+		createTableSQLArray = append(createTableSQLArray, fmt.Sprintf("%s %s", normalizedColName, sfColType))
 	}
 
 	// add a _peerdb_is_deleted column to the normalized table
