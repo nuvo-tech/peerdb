@@ -3,7 +3,7 @@ name: Nuvo stable worker images
 on:
   push:
     tags:
-      - "nuvo-v*"
+      - "v*-nuvo.*"
 
 permissions:
   contents: read
