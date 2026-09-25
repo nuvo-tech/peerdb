@@ -58,6 +58,8 @@ type CDCFlowWorkflowState struct {
 	// Current signalled state of the peer flow.
 	ActiveSignal      model.CDCFlowSignal
 	CurrentFlowStatus protos.FlowStatus
+	// Paused schema refreshes serialize against resume and other mirror changes.
+	SchemaRefreshInProgress bool
 
 	// Initial load settings
 	SnapshotNumRowsPerPartition   uint32

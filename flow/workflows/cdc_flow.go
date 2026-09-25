@@ -543,6 +543,17 @@ func handlePaused(
 		state.ActiveSignal = model.FlowSignalHandler(state.ActiveSignal, val, logger)
 	})
 	flowSignalStateChangeChan.AddToSelector(selector, func(val *protos.FlowStateChangeRequest, _ bool) {
+		// Record the pending transition before yielding so a second refresh cannot
+		// start between the current refresh finishing and the transition applying.
+		switch val.RequestedFlowState {
+		case protos.FlowStatus_STATUS_TERMINATING:
+			state.ActiveSignal = model.TerminateSignal
+		case protos.FlowStatus_STATUS_RESYNC:
+			state.ActiveSignal = model.ResyncSignal
+		}
+		if err := waitForSnowflakeSchemaRefresh(ctx, state); err != nil {
+			return
+		}
 		switch val.RequestedFlowState {
 		case protos.FlowStatus_STATUS_TERMINATING:
 			processTerminate(ctx, cfg, state, val)
@@ -559,6 +570,9 @@ func handlePaused(
 		for state.ActiveSignal == model.PauseSignal && state.FlowConfigUpdate == nil && ctx.Err() == nil {
 			logger.Info(fmt.Sprintf("mirror has been paused for %s", time.Since(startTime).Round(time.Second)))
 			selector.Select(ctx)
+		}
+		if err := waitForSnowflakeSchemaRefresh(ctx, state); err != nil {
+			return nextRunNone, err
 		}
 		if err := ctx.Err(); err != nil {
 			state.UpdateStatus(ctx, logger, protos.FlowStatus_STATUS_TERMINATED)
@@ -957,6 +971,17 @@ func CDCFlowWorkflow(
 	if state == nil {
 		state = cdc_state.NewCDCFlowWorkflowState(ctx, logger, cfg)
 	}
+	if err := registerSnowflakeSchemaRefresh(ctx, cfg, state); err != nil {
+		return state, fmt.Errorf("failed to register schema refresh update: %w", err)
+	}
+	defer func() {
+		// A cancellation or a pending resume must not abandon an accepted update.
+		// The disconnected context lets canceled handlers finish before this run ends.
+		if !workflow.AllHandlersFinished(ctx) {
+			waitCtx, _ := workflow.NewDisconnectedContext(ctx)
+			_ = workflow.Await(waitCtx, func() bool { return workflow.AllHandlersFinished(ctx) })
+		}
+	}()
 
 	flowSignalChan := model.FlowSignal.GetSignalChannel(ctx)
 	flowSignalStateChangeChan := model.FlowSignalStateChange.GetSignalChannel(ctx)
