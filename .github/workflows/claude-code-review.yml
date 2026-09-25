@@ -3,16 +3,13 @@ name: Claude Code Review
 on:
   pull_request:
     types: [opened, synchronize, ready_for_review, reopened]
-  pull_request_target:
-    types: [opened, synchronize, ready_for_review, reopened]
 
 jobs:
   claude-review:
+    # Same-repository PRs only; pull requests from other forks never run this job.
     if: |
       !github.event.pull_request.draft &&
-      ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
-       (github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository))
-    environment: ${{ (github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository) && 'external-contributor' || null }}
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -32,9 +29,6 @@ jobs:
         with:
           allowed_bots: 'renovate'
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          # Fork PRs get an environment-scoped OIDC token that the Claude App token exchange rejects (401),
-          # so pass github_token only there; internal PRs keep the App token flow.
-          github_token: ${{ (github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository) && github.token || '' }}
           claude_args: |
             --model opus
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'

@@ -4,16 +4,13 @@ on:
   pull_request:
     branches: [main]
     # Ignore changes to files that don't require builds or validations.
-    # If more complex build avoidance is required, or for other events than pull_request, push, and pull_request_target,
+    # If more complex build avoidance is required, or for other events than pull_request and push,
     # replace this with a gate step in the job.
     # TODO: Re-enable build avoidance once we figure out how not to block the merge on the flow checks.
     #paths-ignore: &ignore_paths
     #    - '.claude/**'
     #    - 'README.md'
   push:
-    branches: [main]
-    #paths-ignore: *ignore_paths
-  pull_request_target:
     branches: [main]
     #paths-ignore: *ignore_paths
 
@@ -24,15 +21,12 @@ permissions:
   contents: read
 
 jobs:
-  # Jobs that call a reusable workflow cannot set `environment:`, so the
-  # manual-approval gate for external contributions (pull_request_target from
-  # forks) lives in this job; flow_test only runs once it passes.
+  # Nuvo's fork doesn't run CI for pull requests from other forks: flow_test
+  # only runs for same-repository PRs and pushes.
   gate:
     if: |
       (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
-      (github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository) ||
       github.event_name == 'push'
-    environment: ${{ (github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository) && 'external-contributor' || null }}
     runs-on: ubuntu-latest
     steps:
       - name: Approve run
@@ -73,7 +67,7 @@ jobs:
       # export (ENABLE_OTEL_METRICS in tilt-flow.yml), and they panic on export
       # failure, so it must be up before they start.
       ancillary_services: otel-collector postgres postgres2 clickhouse clickhouse-keeper clickhouse-02 mongodb ${{ matrix.db-version.mysql }} mariadb toxiproxy openssh
-      checkout_ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
+      checkout_ref: ${{ github.ref }}
       run_label: pg${{ matrix.db-version.pg }}-my${{ matrix.db-version.mysql }}-ma${{ matrix.db-version.mariadb }}-mo${{ matrix.db-version.mongo }}-ch${{ matrix.db-version.ch }}
       postgres_image: imresamu/postgis:${{ matrix.db-version.pg }}-3.5-alpine
       mysql_gtid_image: ${{ matrix.version-configs.mysql['mysql-gtid'] }}
