@@ -21,9 +21,10 @@ permissions:
   contents: read
 
 jobs:
-  # Apply path-based labels (incl. `deprecated`) to PRs per .github/labeler.yml.
+  # Apply path-based labels (incl. `deprecated`) to same-repository PRs per
+  # .github/labeler.yml. Pull requests from other forks are not labeled.
   label:
-    if: github.event_name == 'pull_request_target'
+    if: github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
       contents: read
