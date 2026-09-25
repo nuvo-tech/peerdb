@@ -1,6 +1,8 @@
-name: Nuvo stable worker images
+name: Nuvo stable PeerDB images
 
 on:
+  pull_request:
+    branches: [nuvo-v0.37.5-maintenance]
   push:
     tags:
       - "v*-nuvo.*"
@@ -35,12 +37,18 @@ jobs:
         run: |
           go test ./connectors/snowflake -run '^(TestGenerateNormalizedTableKeepsSnowflakeUserColumnsNullable|TestGenerateMergeStatementKeepsSnowflakeCastsNullable|TestGenerateAddColumnSQL|TestSnowflakeDefaultExpr)$'
           go test ./connectors/postgres -run '^TestConfigureSnapshotSlotConnection'
+          go test ./activities -run '^(TestRefreshSnowflakeSchema|TestValidateSnowflakeSchemaRefresh|TestSnowflakeSchemaRefreshMappings)'
+          go test ./workflows -run '^(TestSchemaRefresh|TestValidateSnowflakeSchemaRefresh|TestCDCFlowWorkflowReplay)'
+          go test ./cmd -run '^(TestCanonicalSchemaRefreshRequest|TestSchemaRefreshUpdateError)$'
 
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        if: startsWith(github.ref, 'refs/tags/')
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        if: startsWith(github.ref, 'refs/tags/')
 
       - name: Log in to GitHub Container Registry
+        if: startsWith(github.ref, 'refs/tags/')
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
         with:
           registry: ghcr.io
@@ -48,6 +56,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and publish flow-worker
+        if: startsWith(github.ref, 'refs/tags/')
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
@@ -63,6 +72,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=peerdb-flow-worker
 
       - name: Build and publish flow-snapshot-worker
+        if: startsWith(github.ref, 'refs/tags/')
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
@@ -76,3 +86,19 @@ jobs:
             ghcr.io/nuvo-tech/peerdb-flow-snapshot-worker:sha-${{ github.sha }}
           cache-from: type=gha,scope=peerdb-flow-snapshot-worker
           cache-to: type=gha,mode=max,scope=peerdb-flow-snapshot-worker
+
+      - name: Build and publish flow-api
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: stacks/flow.Dockerfile
+          target: flow-api
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: PEERDB_VERSION_SHA_SHORT=${{ github.ref_name }}
+          tags: |
+            ghcr.io/nuvo-tech/peerdb-flow-api:${{ github.ref_name }}
+            ghcr.io/nuvo-tech/peerdb-flow-api:sha-${{ github.sha }}
+          cache-from: type=gha,scope=peerdb-flow-api
+          cache-to: type=gha,mode=max,scope=peerdb-flow-api
