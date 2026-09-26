@@ -94,7 +94,17 @@ func validateSnowflakeSchemaRefresh(
 		previous.Columns = slices.DeleteFunc(previous.Columns, func(field *protos.FieldDescription) bool {
 			return slices.Contains(req.Tables[i].Columns, field.Name)
 		})
-		if !proto.Equal(previous, processed[mapping.DestinationTableIdentifier]) {
+		current := proto.CloneOf(processed[mapping.DestinationTableIdentifier])
+		if len(previous.Columns) == len(current.Columns) {
+			for j, field := range previous.Columns {
+				// CDC can retain nullable metadata after SET NOT NULL on the source.
+				// Keep that permissive cached metadata; this operation only removes columns.
+				if field.Name == current.Columns[j].Name && field.Nullable {
+					current.Columns[j].Nullable = true
+				}
+			}
+		}
+		if !proto.Equal(previous, current) {
 			return nil, invalidSnowflakeSchemaRefresh("schema for %s has drift beyond the selected removed columns", mapping.SourceTableIdentifier)
 		}
 		replacements[mapping.DestinationTableIdentifier] = previous
