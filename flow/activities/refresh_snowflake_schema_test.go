@@ -106,6 +106,10 @@ func TestValidateSnowflakeSchemaRefresh(t *testing.T) {
 		"nullability change": func(_ *protos.FlowConnectionConfigsCore, _ *protos.RefreshSnowflakeSchemaRequest, _ map[string]*protos.TableSchema, source map[string]*protos.TableSchema) {
 			source["public.user"].Columns[1].Nullable = true
 		},
+		"type change with stale nullability": func(_ *protos.FlowConnectionConfigsCore, _ *protos.RefreshSnowflakeSchemaRequest, cached, source map[string]*protos.TableSchema) {
+			cached["raw.user"].Columns[2].Nullable = true
+			source["public.user"].Columns[1].Type = "int64"
+		},
 		"added column": func(_ *protos.FlowConnectionConfigsCore, _ *protos.RefreshSnowflakeSchemaRequest, _ map[string]*protos.TableSchema, source map[string]*protos.TableSchema) {
 			source["public.user"].Columns = append(source["public.user"].Columns, &protos.FieldDescription{Name: "new", Type: "string"})
 		},
@@ -138,6 +142,25 @@ func TestValidateSnowflakeSchemaRefresh(t *testing.T) {
 		require.Len(t, result, 1)
 		require.True(t, proto.Equal(source["public.user"], result["raw.user"]))
 		require.True(t, proto.Equal(original, cached["raw.user"]), "validation must not mutate cached schema")
+		second, err := validateSnowflakeSchemaRefresh(logger, cfg.TableMappings, req, result, source)
+		require.NoError(t, err)
+		require.True(t, proto.Equal(result["raw.user"], second["raw.user"]))
+	})
+
+	t.Run("preserves cached nullability after source SET NOT NULL", func(t *testing.T) {
+		cfg, req, cached, source := snowflakeRefreshFixture()
+		cached["raw.user"].Columns[2].Nullable = true
+		originalCached := proto.CloneOf(cached["raw.user"])
+		originalSource := proto.CloneOf(source["public.user"])
+		expected := proto.CloneOf(originalCached)
+		expected.Columns = slices.Delete(expected.Columns, 1, 2)
+		logger := log.NewStructuredLogger(slog.Default())
+
+		result, err := validateSnowflakeSchemaRefresh(logger, cfg.TableMappings, req, cached, source)
+		require.NoError(t, err)
+		require.True(t, proto.Equal(expected, result["raw.user"]), "only the selected column may change")
+		require.True(t, proto.Equal(originalCached, cached["raw.user"]), "must not mutate the input cache")
+		require.True(t, proto.Equal(originalSource, source["public.user"]), "must not mutate the source schema")
 		second, err := validateSnowflakeSchemaRefresh(logger, cfg.TableMappings, req, result, source)
 		require.NoError(t, err)
 		require.True(t, proto.Equal(result["raw.user"], second["raw.user"]))
