@@ -35,8 +35,9 @@ const (
 		_PEERDB_RECORD_TYPE INTEGER NOT NULL, _PEERDB_MATCH_DATA STRING,_PEERDB_BATCH_ID INT,
 		_PEERDB_UNCHANGED_TOAST_COLUMNS STRING)`
 	createDummyTableSQL               = "CREATE TABLE IF NOT EXISTS %s.%s(_PEERDB_DUMMY_COL STRING)"
-	createNormalizedTableSQL          = "CREATE TABLE IF NOT EXISTS %s(%s)"
-	createOrReplaceNormalizedTableSQL = "CREATE OR REPLACE TABLE %s(%s)"
+	createNormalizedTableSQL          = "CREATE TABLE IF NOT EXISTS %s(%s) CHANGE_TRACKING = TRUE"
+	createOrReplaceNormalizedTableSQL = "CREATE OR REPLACE TABLE %s(%s) CHANGE_TRACKING = TRUE"
+	enableChangeTrackingSQL           = "ALTER TABLE %s SET CHANGE_TRACKING = TRUE"
 	toVariantColumnName               = "VAR_COLS"
 	mergeStatementSQL                 = `MERGE INTO %s TARGET USING (WITH VARIANT_CONVERTED AS (
 		SELECT _PEERDB_UID,_PEERDB_TIMESTAMP,TO_VARIANT(PARSE_JSON(_PEERDB_DATA)) %s,_PEERDB_RECORD_TYPE,
@@ -321,7 +322,13 @@ func (c *SnowflakeConnector) SetupNormalizedTable(
 		return false, fmt.Errorf("error occurred while checking if normalized table exists: %w", err)
 	}
 	if tableAlreadyExists && !config.IsResync {
-		c.logger.Info("[snowflake] table already exists, skipping",
+		if _, err := c.execWithLogging(ctx, fmt.Sprintf(
+			enableChangeTrackingSQL,
+			snowflakeSchemaTableNormalize(normalizedSchemaTable),
+		)); err != nil {
+			return false, fmt.Errorf("unable to enable change tracking on table %s: %w", tableIdentifier, err)
+		}
+		c.logger.Info("[snowflake] table already exists",
 			slog.String("table", tableIdentifier))
 		return true, nil
 	}
@@ -870,6 +877,9 @@ func (c *SnowflakeConnector) RenameTables(
 
 		// renaming and dropping such that the _resync table is the new destination
 		c.logger.Info(fmt.Sprintf("renaming table '%s' to '%s'...", src, dst))
+		if _, err = c.execWithLoggingTx(ctx, fmt.Sprintf(enableChangeTrackingSQL, src), renameTablesTx); err != nil {
+			return nil, fmt.Errorf("unable to enable change tracking on table %s: %w", src, err)
+		}
 
 		// drop the dst table if exists
 		_, err = c.execWithLoggingTx(ctx, "DROP TABLE IF EXISTS "+dst, renameTablesTx)
@@ -917,6 +927,11 @@ func (c *SnowflakeConnector) CreateTablesFromExisting(ctx context.Context, req *
 			fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s LIKE %s", newTable, existingTable), createTablesFromExistingTx,
 		); err != nil {
 			return nil, fmt.Errorf("unable to create table %s: %w", newTable, err)
+		}
+		if _, err := c.execWithLoggingTx(ctx,
+			fmt.Sprintf(enableChangeTrackingSQL, newTable), createTablesFromExistingTx,
+		); err != nil {
+			return nil, fmt.Errorf("unable to enable change tracking on table %s: %w", newTable, err)
 		}
 
 		c.logger.Info(fmt.Sprintf("successfully created table '%s'", newTable))

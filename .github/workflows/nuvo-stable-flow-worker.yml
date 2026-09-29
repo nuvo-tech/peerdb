@@ -35,7 +35,7 @@ jobs:
       - name: Test Nuvo patches
         working-directory: flow
         run: |
-          go test ./connectors/snowflake -run '^(TestGenerateNormalizedTableKeepsSnowflakeUserColumnsNullable|TestGenerateMergeStatementKeepsSnowflakeCastsNullable|TestGenerateAddColumnSQL|TestSnowflakeDefaultExpr)$'
+          go test ./connectors/snowflake -run '^(TestGenerateNormalizedTableKeepsSnowflakeUserColumnsNullable|TestGenerateMergeStatementKeepsSnowflakeCastsNullable|TestGenerateAddColumnSQL|TestSnowflakeDefaultExpr|TestNormalizedTablesEnableChangeTracking)$'
           go test ./connectors/postgres -run '^TestConfigureSnapshotSlotConnection'
           go test ./activities -run '^(TestRefreshSnowflakeSchema|TestValidateSnowflakeSchemaRefresh|TestSnowflakeSchemaRefreshMappings)'
           go test ./workflows -run '^(TestSchemaRefresh|TestValidateSnowflakeSchemaRefresh|TestCDCFlowWorkflowReplay)'
