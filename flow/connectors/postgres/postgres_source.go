@@ -1018,16 +1018,14 @@ func (c *PostgresConnector) HandleSlotInfo(
 
 	var intervalSinceLastNormalize *time.Duration
 	if err := alerter.CatalogPool.QueryRow(
-		ctx, "SELECT now()-last_updated_at FROM peerdb_stats.cdc_table_aggregate_counts WHERE flow_name=$1", alertKeys.FlowName,
+		ctx, intervalSinceLastNormalizeQuery, alertKeys.FlowName,
 	).Scan(&intervalSinceLastNormalize); err != nil {
 		logger.Warn("failed to get interval since last normalize", slog.Any("error", err))
 	}
-	// what if the first normalize errors out/hangs?
+	// Before the first completed normalize, age is unknown; still record slot history.
 	if intervalSinceLastNormalize == nil {
 		logger.Warn("interval since last normalize is nil")
-		return nil
-	}
-	if intervalSinceLastNormalize != nil {
+	} else {
 		slotMetricGauges.IntervalSinceLastNormalizeGauge.Record(ctx, intervalSinceLastNormalize.Seconds(),
 			metric.WithAttributeSet(attribute.NewSet(
 				attribute.String(otel_metrics.FlowNameKey, alertKeys.FlowName),
@@ -1039,6 +1037,13 @@ func (c *PostgresConnector) HandleSlotInfo(
 
 	return monitoring.AppendSlotSizeInfo(ctx, catalogPool, alertKeys.PeerName, slotInfo)
 }
+
+// Table aggregate timestamps track individual tables reaching intermediate storage.
+// Only a completed CDC batch proves that normalization reached the destination.
+const intervalSinceLastNormalizeQuery = `
+	SELECT now() - MAX(end_time)
+	FROM peerdb_stats.cdc_batches
+	WHERE flow_name = $1`
 
 func getOpenConnectionsForUser(ctx context.Context, conn *pgx.Conn, user string) (*protos.GetOpenConnectionsForUserResult, error) {
 	// COUNT() returns BIGINT
