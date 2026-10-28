@@ -14,6 +14,18 @@ permissions:
 jobs:
   test-and-publish:
     runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:14-alpine
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: peerdb_cadence_test
+        ports: [5432:5432]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -34,9 +46,17 @@ jobs:
 
       - name: Test Nuvo patches
         working-directory: flow
+        env:
+          PEERDB_CATALOG_HOST: localhost
+          PEERDB_CATALOG_PORT: '5432'
+          PEERDB_CATALOG_USER: postgres
+          PEERDB_CATALOG_DATABASE: peerdb_cadence_test
         run: |
+          for migration in V5__monitoring_init.sql V12__slot_size.sql V13__wal_status.sql V25__recordtypecounts.sql V43__cdc_table_aggregate_counts.sql V50__cdc_batches_sync_time.sql; do
+            psql -h localhost -U postgres -d peerdb_cadence_test -v ON_ERROR_STOP=1 -f ../nexus/catalog/migrations/$migration
+          done
           go test ./connectors/snowflake -run '^(TestGenerateNormalizedTableKeepsSnowflakeUserColumnsNullable|TestGenerateMergeStatementKeepsSnowflakeCastsNullable|TestGenerateAddColumnSQL|TestSnowflakeDefaultExpr|TestNormalizedTablesEnableChangeTracking)$'
-          go test ./connectors/postgres -run '^TestConfigureSnapshotSlotConnection'
+          go test ./connectors/postgres -run '^(TestConfigureSnapshotSlotConnection|TestIntervalSinceLastNormalize|TestHandleSlotInfoRecordsHistoryBeforeFirstNormalize)'
           go test ./activities -run '^(TestRefreshSnowflakeSchema|TestValidateSnowflakeSchemaRefresh|TestSnowflakeSchemaRefreshMappings)'
           go test ./workflows -run '^(TestSchemaRefresh|TestValidateSnowflakeSchemaRefresh|TestCDCFlowWorkflowReplay)'
           go test ./cmd -run '^(TestCanonicalSchemaRefreshRequest|TestSchemaRefreshUpdateError)$'
